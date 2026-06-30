@@ -1,0 +1,46 @@
+name: Weekly Reading Notes Report
+
+on:
+  schedule:
+    # 00:00 UTC every Monday = 08:00 Monday in China Standard Time.
+    - cron: "0 0 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  generate-report:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Generate weekly reading report
+        env:
+          READING_NOTE_SOURCES_JSON: ${{ secrets.READING_NOTE_SOURCES_JSON }}
+          DOUBAN_COOKIE: ${{ secrets.DOUBAN_COOKIE }}
+          WEREAD_COOKIE: ${{ secrets.WEREAD_COOKIE }}
+          READING_REPORT_DIR: reports/reading-notes
+        run: python tools/reading-notes/generate_weekly_report.py
+
+      - name: Upload report artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: weekly-reading-notes-report
+          path: reports/reading-notes/*.md
+          if-no-files-found: error
+
+      - name: Commit report
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add reports/reading-notes/*.md
+          git diff --staged --quiet || git commit -m "docs: update weekly reading notes report"
+          git push
