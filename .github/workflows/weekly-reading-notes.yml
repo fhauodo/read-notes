@@ -24,7 +24,7 @@ jobs:
 
       - name: Generate weekly reading report
         env:
-          READING_NOTE_SOURCES_JSON: ${{ secrets.READING_NOTE_SOURCES_JSON }}
+          READING_NOTE_SOURCES_JSON: ${{ vars.READING_NOTE_SOURCES_JSON || secrets.READING_NOTE_SOURCES_JSON }}
           DOUBAN_COOKIE: ${{ secrets.DOUBAN_COOKIE }}
           WEREAD_COOKIE: ${{ secrets.WEREAD_COOKIE }}
           READING_REPORT_DIR: reports/reading-notes

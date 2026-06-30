@@ -1,17 +1,14 @@
 #!/usr/bin/env python3
-"""Generate a weekly reading notes report from configured online sources.
+"""Generate a weekly report from public reading-note sources.
 
 Configuration is read from READING_NOTE_SOURCES_JSON.
 
 Example:
 [
-  {"name": "豆瓣", "type": "html", "url": "https://www.douban.com/people/<id>/notes"},
-  {"name": "微信读书导出", "type": "json", "url": "https://example.com/weread-notes.json"}
+  {"name": "豆瓣公开读书笔记", "type": "html", "url": "https://www.douban.com/..."},
+  {"name": "读书博客 RSS", "type": "rss", "url": "https://example.com/feed.xml"},
+  {"name": "整理好的公开笔记源", "type": "json", "url": "https://example.com/notes.json"}
 ]
-
-Optional secrets:
-- DOUBAN_COOKIE: added to requests whose source name contains "豆瓣" or "douban".
-- WEREAD_COOKIE: added to requests whose source name contains "微信读书" or "weread".
 """
 
 from __future__ import annotations
@@ -25,6 +22,7 @@ import sys
 import textwrap
 import urllib.error
 import urllib.request
+import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from html.parser import HTMLParser
 from pathlib import Path
@@ -124,6 +122,8 @@ def fetch_source_notes(source: dict[str, Any], week_start: dt.date, week_end: dt
         notes = parse_json_notes(payload, source)
     elif source_type == "html":
         notes = parse_html_notes(payload, source)
+    elif source_type == "rss":
+        notes = parse_rss_notes(payload, source)
     else:
         raise ValueError(f"Unsupported source type: {source_type}")
 
@@ -139,9 +139,11 @@ def request_text(url: str, source: dict[str, Any]) -> str:
     headers = {"User-Agent": USER_AGENT}
     headers.update(source.get("headers") or {})
 
-    cookie = cookie_for_source(str(source.get("name", "")))
-    if cookie:
-        headers["Cookie"] = cookie
+    cookie_env = source.get("cookieEnv")
+    if cookie_env:
+        cookie = os.getenv(str(cookie_env), "")
+        if cookie:
+            headers["Cookie"] = cookie
 
     request = urllib.request.Request(url, headers=headers)
     try:
@@ -152,15 +154,6 @@ def request_text(url: str, source: dict[str, Any]) -> str:
         raise RuntimeError(f"HTTP {exc.code} when requesting {url}") from exc
     except urllib.error.URLError as exc:
         raise RuntimeError(f"Network error when requesting {url}: {exc.reason}") from exc
-
-
-def cookie_for_source(name: str) -> str:
-    lowered = name.lower()
-    if "豆瓣" in name or "douban" in lowered:
-        return os.getenv("DOUBAN_COOKIE", "")
-    if "微信读书" in name or "weread" in lowered:
-        return os.getenv("WEREAD_COOKIE", "")
-    return ""
 
 
 def parse_json_notes(payload: str, source: dict[str, Any]) -> list[Note]:
@@ -183,6 +176,31 @@ def parse_json_notes(payload: str, source: dict[str, Any]) -> list[Note]:
                 content=clean_text(str(content)),
                 url=str(item.get("url") or source.get("url") or ""),
                 created_at=parse_date(first_present(item, ["created_at", "createdAt", "date", "time"])),
+            )
+        )
+    return notes
+
+
+def parse_rss_notes(payload: str, source: dict[str, Any]) -> list[Note]:
+    root = ET.fromstring(payload)
+    notes: list[Note] = []
+    for item in root.findall(".//item"):
+        title = text_from_xml(item, "title") or "未命名文章"
+        content = (
+            text_from_xml(item, "description")
+            or text_from_xml(item, "summary")
+            or text_from_xml(item, "content")
+        )
+        link = text_from_xml(item, "link") or str(source.get("url", ""))
+        if not content:
+            continue
+        notes.append(
+            Note(
+                source=str(source.get("name", "未命名来源")),
+                title=clean_text(title),
+                content=clean_text(content),
+                url=clean_text(link),
+                created_at=parse_date(text_from_xml(item, "pubDate") or text_from_xml(item, "published")),
             )
         )
     return notes
@@ -215,6 +233,13 @@ def parse_html_notes(payload: str, source: dict[str, Any]) -> list[Note]:
     return notes
 
 
+def text_from_xml(node: ET.Element, tag_name: str) -> str:
+    for child in node.iter():
+        if child.tag.split("}")[-1] == tag_name and child.text:
+            return child.text.strip()
+    return ""
+
+
 def split_note_like_chunks(text: str) -> list[str]:
     candidates = re.split(r"(?:\n\s*){2,}|(?=《[^》]{1,80}》)", text)
     return [candidate.strip() for candidate in candidates if candidate.strip()]
@@ -241,12 +266,53 @@ def parse_date(value: Any) -> dt.date | None:
     text = str(value)
     match = re.search(r"(20\d{2})[-/.年](\d{1,2})[-/.月](\d{1,2})", text)
     if not match:
-        return None
+        match = re.search(r"(\d{1,2})\s+([A-Za-z]{3,})\s+(20\d{2})", text)
+        if not match:
+            return None
+        day_text, month_text, year_text = match.groups()
+        month = month_number(month_text)
+        if not month:
+            return None
+        year, day = int(year_text), int(day_text)
+        try:
+            return dt.date(year, month, day)
+        except ValueError:
+            return None
     year, month, day = map(int, match.groups())
     try:
         return dt.date(year, month, day)
     except ValueError:
         return None
+
+
+def month_number(value: str) -> int | None:
+    months = {
+        "jan": 1,
+        "january": 1,
+        "feb": 2,
+        "february": 2,
+        "mar": 3,
+        "march": 3,
+        "apr": 4,
+        "april": 4,
+        "may": 5,
+        "jun": 6,
+        "june": 6,
+        "jul": 7,
+        "july": 7,
+        "aug": 8,
+        "august": 8,
+        "sep": 9,
+        "sept": 9,
+        "september": 9,
+        "oct": 10,
+        "october": 10,
+        "nov": 11,
+        "november": 11,
+        "dec": 12,
+        "december": 12,
+    }
+    return months.get(value.lower())
 
 
 def clean_text(value: str) -> str:
